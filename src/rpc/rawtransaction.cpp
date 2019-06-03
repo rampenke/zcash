@@ -177,10 +177,11 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
             if (GetSpentIndex(spentKey, spentInfo)) {
                 in.push_back(Pair("value", ValueFromAmount(spentInfo.satoshis)));
                 in.push_back(Pair("valueSat", spentInfo.satoshis));
-                if (spentInfo.addressType == 1) {
-                    in.push_back(Pair("address", EncodeDestination(CKeyID(spentInfo.addressHash))));
-                } else if (spentInfo.addressType == 2)  {
-                    in.push_back(Pair("address", EncodeDestination(CScriptID(spentInfo.addressHash))));
+
+                boost::optional<CTxDestination> dest =
+                    DestFromAddressHash(spentInfo.addressType, spentInfo.addressHash);
+                if (dest) {
+                    in.push_back(Pair("address", EncodeDestination(*dest)));
                 }
             }
         }
@@ -198,7 +199,7 @@ void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry)
         UniValue o(UniValue::VOBJ);
         ScriptPubKeyToJSON(txout.scriptPubKey, o, true);
         out.push_back(Pair("scriptPubKey", o));
- 
+
         // Add spent information if spentindex is enabled
         CSpentIndexValue spentInfo;
         CSpentIndexKey spentKey(txid, i);

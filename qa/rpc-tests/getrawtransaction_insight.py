@@ -1,5 +1,5 @@
 #!/usr/bin/env python2
-# Copyright (c) 2014-2015 The Bitcoin Core developers
+# Copyright (c) 2019 The Zcash developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -9,19 +9,14 @@
 #
 
 from test_framework.test_framework import BitcoinTestFramework
-from test_framework.authproxy import JSONRPCException
 
 from test_framework.util import assert_equal
 from test_framework.util import initialize_chain_clean
 from test_framework.util import start_nodes, stop_nodes, connect_nodes
 from test_framework.util import wait_bitcoinds
 
-from test_framework.script import CScript, OP_HASH160, OP_EQUAL, OP_DUP, OP_EQUALVERIFY
+from test_framework.mininode import COIN
 
-from test_framework.mininode import COIN, CTransaction
-from test_framework.mininode import CTxIn, CTxOut, COutPoint
-
-from binascii import hexlify
 
 class GetrawtransactionTest(BitcoinTestFramework):
 
@@ -53,7 +48,7 @@ class GetrawtransactionTest(BitcoinTestFramework):
         a = self.nodes[1].getnewaddress()
         txid_a = self.nodes[0].sendtoaddress(a, 2)
         self.sync_all()
-        block_hash_a = self.nodes[0].generate(1)
+        self.nodes[0].generate(1)
         self.sync_all()
 
         # send from a to b
@@ -66,8 +61,16 @@ class GetrawtransactionTest(BitcoinTestFramework):
         tx_b = self.nodes[2].getrawtransaction(txid_b, 1)
         assert('height' not in tx_b)
 
-        # confirm a to b transaction
-        block_hash_b = self.nodes[0].generate(1)
+        self.sync_all()
+        tx_a = self.nodes[2].getrawtransaction(txid_a, 1)
+
+        # txid_b is not yet confirmed, so these should not be set
+        assert('spentTxId' not in tx_a['vout'][0])
+        assert('spentIndex' not in tx_a['vout'][0])
+        assert('spentHeight' not in tx_a['vout'][0])
+
+        # confirm txid_b (a to b transaction)
+        self.nodes[0].generate(1)
         self.sync_all()
 
         # Restart all nodes to ensure index files are saved to disk and recovered
@@ -81,7 +84,6 @@ class GetrawtransactionTest(BitcoinTestFramework):
         assert_equal(tx_a['vin'][0]['valueSat'], 10*COIN)
         # we want the non-change (payment) output
         vout = filter(lambda o: o['value'] == 2, tx_a['vout'])
-        n = vout[0]['n']
         assert_equal(vout[0]['spentTxId'], txid_b)
         assert_equal(vout[0]['spentIndex'], 0)
         assert_equal(vout[0]['spentHeight'], 107)
