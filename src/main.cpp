@@ -21,7 +21,6 @@
 #include "metrics.h"
 #include "net.h"
 #include "pow.h"
-#include "txdb.h"
 #include "txmempool.h"
 #include "ui_interface.h"
 #include "undo.h"
@@ -1600,9 +1599,47 @@ bool AcceptToMemoryPool(CTxMemPool& pool, CValidationState &state, const CTransa
 
         // Store transaction in memory
         pool.addUnchecked(hash, entry, !IsInitialBlockDownload(Params()));
+
+        // Add memory address index
+        if (fAddressIndex) {
+            pool.addAddressIndex(entry, view);
+        }
     }
 
     SyncWithWallets(tx, NULL);
+
+    return true;
+}
+
+bool GetSpentIndex(CSpentIndexKey &key, CSpentIndexValue &value)
+{
+    AssertLockHeld(cs_main);
+    if (!fSpentIndex)
+        return false;
+    return pblocktree->ReadSpentIndex(key, value);
+}
+
+bool GetAddressIndex(uint160 addressHash, int type,
+                     std::vector<CAddressIndexDbEntry> &addressIndex,
+                     int start, int end)
+{
+    if (!fAddressIndex)
+        return error("address index not enabled");
+
+    if (!pblocktree->ReadAddressIndex(addressHash, type, addressIndex, start, end))
+        return error("unable to get txids for address");
+
+    return true;
+}
+
+bool GetAddressUnspent(uint160 addressHash, int type,
+                       std::vector<CAddressUnspentDbEntry> &unspentOutputs)
+{
+    if (!fAddressIndex)
+        return error("address index not enabled");
+
+    if (!pblocktree->ReadAddressUnspentIndex(addressHash, type, unspentOutputs))
+        return error("unable to get txids for address");
 
     return true;
 }
@@ -2269,18 +2306,19 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
         if (fAddressIndex && updateIndices) {
             for (unsigned int k = tx.vout.size(); k-- > 0;) {
                 const CTxOut &out = tx.vout[k];
-                int const scriptType = out.scriptPubKey.Type();
-                if (scriptType > 0) {
+                const boost::optional<CScript::ScriptType> scriptType =
+                    out.scriptPubKey.GetType();
+                if (scriptType) {
                     uint160 const addrHash = out.scriptPubKey.AddressHash();
 
                     // undo receiving activity
                     addressIndex.push_back(make_pair(
-                        CAddressIndexKey(scriptType, addrHash, pindex->nHeight, i, hash, k, false),
+                        CAddressIndexKey(*scriptType, addrHash, pindex->nHeight, i, hash, k, false),
                         out.nValue));
 
                     // undo unspent index
                     addressUnspentIndex.push_back(make_pair(
-                        CAddressUnspentKey(scriptType, addrHash, hash, k),
+                        CAddressUnspentKey(*scriptType, addrHash, hash, k),
                         CAddressUnspentValue()));
                 }
             }
@@ -2326,18 +2364,19 @@ static DisconnectResult DisconnectBlock(const CBlock& block, CValidationState& s
                 const CTxIn input = tx.vin[j];
                 if (fAddressIndex && updateIndices) {
                     const CTxOut &prevout = view.GetOutputFor(input);
-                    int const scriptType = prevout.scriptPubKey.Type();
-                    if (scriptType > 0) {
+                    const boost::optional<CScript::ScriptType> scriptType =
+                        prevout.scriptPubKey.GetType();
+                    if (scriptType) {
                         uint160 const addrHash = prevout.scriptPubKey.AddressHash();
 
                         // undo spending activity
                         addressIndex.push_back(make_pair(
-                            CAddressIndexKey(scriptType, addrHash, pindex->nHeight, i, hash, j, true),
+                            CAddressIndexKey(*scriptType, addrHash, pindex->nHeight, i, hash, j, true),
                             prevout.nValue * -1));
 
                         // restore unspent index
                         addressUnspentIndex.push_back(make_pair(
-                            CAddressUnspentKey(scriptType, addrHash, input.prevout.hash, input.prevout.n),
+                            CAddressUnspentKey(*scriptType, addrHash, input.prevout.hash, input.prevout.n),
                             CAddressUnspentValue(prevout.nValue, prevout.scriptPubKey, undo.nHeight)));
                     }
                 }
@@ -2643,17 +2682,18 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
 
                     const CTxIn input = tx.vin[j];
                     const CTxOut &prevout = view.GetOutputFor(tx.vin[j]);
-                    int const scriptType = prevout.scriptPubKey.Type();
+                    const boost::optional<CScript::ScriptType> scriptType =
+                        prevout.scriptPubKey.GetType();
                     const uint160 addrHash = prevout.scriptPubKey.AddressHash();
-                    if (fAddressIndex && scriptType > 0) {
+                    if (fAddressIndex && scriptType) {
                         // record spending activity
                         addressIndex.push_back(make_pair(
-                            CAddressIndexKey(scriptType, addrHash, pindex->nHeight, i, hash, j, true),
+                            CAddressIndexKey(*scriptType, addrHash, pindex->nHeight, i, hash, j, true),
                             prevout.nValue * -1));
 
                         // remove address from unspent index
                         addressUnspentIndex.push_back(make_pair(
-                            CAddressUnspentKey(scriptType, addrHash, input.prevout.hash, input.prevout.n),
+                            CAddressUnspentKey(*scriptType, addrHash, input.prevout.hash, input.prevout.n),
                             CAddressUnspentValue()));
                     }
                     if (fSpentIndex) {
@@ -2663,7 +2703,8 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
                         // spentindex db, with a script type of 0 and addrhash of all zeroes.
                         spentIndex.push_back(make_pair(
                             CSpentIndexKey(input.prevout.hash, input.prevout.n),
-                            CSpentIndexValue(hash, j, pindex->nHeight, prevout.nValue, scriptType, addrHash)));
+                            CSpentIndexValue(hash, j, pindex->nHeight, prevout.nValue,
+                                (scriptType ? *scriptType : 0), addrHash)));
                     }
                 }
             }
@@ -2695,18 +2736,19 @@ bool ConnectBlock(const CBlock& block, CValidationState& state, CBlockIndex* pin
         if (fAddressIndex) {
             for (unsigned int k = 0; k < tx.vout.size(); k++) {
                 const CTxOut &out = tx.vout[k];
-                int const scriptType = out.scriptPubKey.Type();
-                if (scriptType > 0) {
+                const boost::optional<CScript::ScriptType> scriptType =
+                    out.scriptPubKey.GetType();
+                if (*scriptType) {
                     uint160 const addrHash = out.scriptPubKey.AddressHash();
 
                     // record receiving activity
                     addressIndex.push_back(make_pair(
-                        CAddressIndexKey(scriptType, addrHash, pindex->nHeight, i, hash, k, false),
+                        CAddressIndexKey(*scriptType, addrHash, pindex->nHeight, i, hash, k, false),
                         out.nValue));
 
                     // record unspent output
                     addressUnspentIndex.push_back(make_pair(
-                        CAddressUnspentKey(scriptType, addrHash, hash, k),
+                        CAddressUnspentKey(*scriptType, addrHash, hash, k),
                         CAddressUnspentValue(out.nValue, out.scriptPubKey, pindex->nHeight)));
                 }
             }
